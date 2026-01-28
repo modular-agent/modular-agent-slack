@@ -16,7 +16,6 @@ static PORT_TRIGGER: &str = "trigger";
 static PORT_MESSAGES: &str = "messages";
 
 static CONFIG_CHANNEL: &str = "channel";
-static CONFIG_TOKEN: &str = "token";
 static CONFIG_LIMIT: &str = "limit";
 static CONFIG_SLACK_BOT_TOKEN: &str = "slack_bot_token";
 
@@ -26,31 +25,23 @@ static CLIENT: OnceLock<SlackClient<HyperConnector>> = OnceLock::new();
 
 fn get_client() -> &'static SlackClient<HyperConnector> {
     CLIENT.get_or_init(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("Failed to initialize rustls crypto provider");
         SlackClient::new(
             SlackClientHyperConnector::new().expect("Failed to create Slack client HTTP connector"),
         )
     })
 }
 
-fn get_token(mak: &MAK, config_token: &str) -> Result<SlackApiToken, AgentError> {
-    let token_str = if !config_token.is_empty() {
-        // 1. Agent-level config takes priority
-        if let Some(env_name) = config_token.strip_prefix('$') {
-            env::var(env_name).map_err(|_| {
-                AgentError::InvalidValue(format!("Environment variable {} not set", env_name))
-            })?
-        } else {
-            config_token.to_string()
-        }
-    } else if let Some(global_token) = mak
+fn get_token(mak: &MAK) -> Result<SlackApiToken, AgentError> {
+    let token_str = if let Some(global_token) = mak
         .get_global_configs(SlackPostAgent::DEF_NAME)
         .and_then(|cfg| cfg.get_string(CONFIG_SLACK_BOT_TOKEN).ok())
         .filter(|key| !key.is_empty())
     {
-        // 2. Global config
         global_token
     } else {
-        // 3. Environment variable fallback
         env::var("SLACK_BOT_TOKEN")
             .map_err(|_| AgentError::InvalidValue("SLACK_BOT_TOKEN not set".to_string()))?
     };
@@ -62,10 +53,6 @@ fn get_token(mak: &MAK, config_token: &str) -> Result<SlackApiToken, AgentError>
 ///
 /// # Configuration
 /// - `channel`: The Slack channel name (e.g., "#general") or channel ID
-/// - `token`: Bot token. Can be:
-///   - Empty: uses SLACK_BOT_TOKEN environment variable
-///   - $ENV_NAME: uses the specified environment variable
-///   - Direct token value
 ///
 /// # Input
 /// - `message`: String message or object with `text`, `blocks`, `thread_ts` fields
@@ -78,7 +65,6 @@ fn get_token(mak: &MAK, config_token: &str) -> Result<SlackApiToken, AgentError>
     inputs = [PORT_MESSAGE],
     outputs = [PORT_RESULT],
     string_config(name = CONFIG_CHANNEL),
-    string_config(name = CONFIG_TOKEN),
     string_global_config(name = CONFIG_SLACK_BOT_TOKEN, title = "Slack Bot Token"),
 )]
 struct SlackPostAgent {
@@ -107,7 +93,7 @@ impl AsAgent for SlackPostAgent {
             ));
         }
 
-        let token = get_token(self.mak(), &config.get_string_or_default(CONFIG_TOKEN))?;
+        let token = get_token(self.mak())?;
         let client = get_client();
         let session = client.open_session(&token);
 
@@ -184,7 +170,6 @@ fn extract_message_content(
 ///
 /// # Configuration
 /// - `channel`: The Slack channel name or ID to fetch history from
-/// - `token`: Bot token (same format as SlackPostAgent)
 /// - `limit`: Maximum number of messages to fetch (default: 10)
 ///
 /// # Input
@@ -198,7 +183,6 @@ fn extract_message_content(
     inputs = [PORT_TRIGGER],
     outputs = [PORT_MESSAGES],
     string_config(name = CONFIG_CHANNEL),
-    string_config(name = CONFIG_TOKEN),
     integer_config(name = CONFIG_LIMIT),
 )]
 struct SlackHistoryAgent {
@@ -227,7 +211,7 @@ impl AsAgent for SlackHistoryAgent {
             ));
         }
 
-        let token = get_token(self.mak(), &config.get_string_or_default(CONFIG_TOKEN))?;
+        let token = get_token(self.mak())?;
         let limit = config.get_integer_or_default(CONFIG_LIMIT);
         let limit = if limit <= 0 { 10 } else { limit as u16 };
 
@@ -282,7 +266,6 @@ fn slack_message_to_agent_value(msg: &SlackHistoryMessage) -> AgentValue {
 /// Agent for listing Slack channels.
 ///
 /// # Configuration
-/// - `token`: Bot token (same format as SlackPostAgent)
 /// - `limit`: Maximum number of channels to fetch (default: 100)
 ///
 /// # Input
@@ -295,7 +278,6 @@ fn slack_message_to_agent_value(msg: &SlackHistoryMessage) -> AgentValue {
     category = CATEGORY,
     inputs = [PORT_TRIGGER],
     outputs = ["channels"],
-    string_config(name = CONFIG_TOKEN),
     integer_config(name = CONFIG_LIMIT),
 )]
 struct SlackChannelsAgent {
@@ -317,7 +299,7 @@ impl AsAgent for SlackChannelsAgent {
         _value: AgentValue,
     ) -> Result<(), AgentError> {
         let config = self.configs()?;
-        let token = get_token(self.mak(), &config.get_string_or_default(CONFIG_TOKEN))?;
+        let token = get_token(self.mak())?;
         let limit = config.get_integer_or_default(CONFIG_LIMIT);
         let limit = if limit <= 0 { 100 } else { limit as u16 };
 
