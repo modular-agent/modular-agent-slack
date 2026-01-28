@@ -1,5 +1,5 @@
 use std::env;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use im::{Vector, hashmap};
 use modular_agent_kit::{
@@ -7,6 +7,8 @@ use modular_agent_kit::{
     async_trait, modular_agent,
 };
 use slack_morphism::prelude::*;
+use tokio::sync::mpsc;
+use tracing::error;
 
 static CATEGORY: &str = "Slack";
 
@@ -18,6 +20,7 @@ static PORT_MESSAGES: &str = "messages";
 static CONFIG_CHANNEL: &str = "channel";
 static CONFIG_LIMIT: &str = "limit";
 static CONFIG_SLACK_BOT_TOKEN: &str = "slack_bot_token";
+static CONFIG_SLACK_APP_TOKEN: &str = "slack_app_token";
 
 type HyperConnector = SlackClientHyperConnector<SlackHyperHttpsConnector>;
 
@@ -44,6 +47,21 @@ fn get_token(mak: &MAK) -> Result<SlackApiToken, AgentError> {
     } else {
         env::var("SLACK_BOT_TOKEN")
             .map_err(|_| AgentError::InvalidValue("SLACK_BOT_TOKEN not set".to_string()))?
+    };
+
+    Ok(SlackApiToken::new(SlackApiTokenValue(token_str)))
+}
+
+fn get_app_token(mak: &MAK) -> Result<SlackApiToken, AgentError> {
+    let token_str = if let Some(global_token) = mak
+        .get_global_configs(SlackListenerAgent::DEF_NAME)
+        .and_then(|cfg| cfg.get_string(CONFIG_SLACK_APP_TOKEN).ok())
+        .filter(|key| !key.is_empty())
+    {
+        global_token
+    } else {
+        env::var("SLACK_APP_TOKEN")
+            .map_err(|_| AgentError::InvalidValue("SLACK_APP_TOKEN not set".to_string()))?
     };
 
     Ok(SlackApiToken::new(SlackApiTokenValue(token_str)))
@@ -359,6 +377,178 @@ fn slack_channel_to_agent_value(ch: &SlackChannelInfo) -> AgentValue {
 
     if let Some(ref purpose) = ch.purpose {
         obj.insert("purpose".into(), AgentValue::string(purpose.value.clone()));
+    }
+
+    AgentValue::object(obj)
+}
+
+/// Agent for listening to Slack messages in real-time via Socket Mode.
+///
+/// This agent starts listening when activated and outputs messages as they arrive.
+///
+/// # Configuration
+/// - `channel`: Optional channel filter. If empty, listens to all channels.
+///
+/// # Output
+/// - `message`: Message objects containing `text`, `user`, `channel`, `ts`, `thread_ts` fields
+///
+/// # Required Tokens
+/// - `SLACK_BOT_TOKEN`: Bot User OAuth Token (via global config or environment)
+/// - `SLACK_APP_TOKEN`: App-Level Token with `connections:write` scope (via global config or environment)
+#[modular_agent(
+    title = "Listener",
+    category = CATEGORY,
+    outputs = [PORT_MESSAGE],
+    string_config(name = CONFIG_CHANNEL),
+    string_global_config(name = CONFIG_SLACK_APP_TOKEN, title = "Slack App Token"),
+)]
+struct SlackListenerAgent {
+    data: AgentData,
+    shutdown_tx: Option<mpsc::Sender<()>>,
+}
+
+struct SlackListenerUserState {
+    mak: MAK,
+    id: String,
+    channel_filter: Option<String>,
+}
+
+#[async_trait]
+impl AsAgent for SlackListenerAgent {
+    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+        Ok(Self {
+            data: AgentData::new(mak, id, spec),
+            shutdown_tx: None,
+        })
+    }
+
+    async fn start(&mut self) -> Result<(), AgentError> {
+        let config = self.configs()?;
+        let channel_filter = config.get_string_or_default(CONFIG_CHANNEL);
+        let channel_filter = if channel_filter.is_empty() {
+            None
+        } else {
+            Some(channel_filter)
+        };
+
+        let app_token = get_app_token(self.mak())?;
+
+        let client = Arc::new(get_client().clone());
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+        self.shutdown_tx = Some(shutdown_tx);
+
+        let mak = self.mak().clone();
+        let id = self.id().to_string();
+
+        tokio::spawn(async move {
+            let user_state = SlackListenerUserState {
+                mak,
+                id,
+                channel_filter,
+            };
+
+            let listener_environment = Arc::new(
+                SlackClientEventsListenerEnvironment::new(client.clone())
+                    .with_user_state(user_state),
+            );
+
+            let socket_mode_callbacks = SlackSocketModeListenerCallbacks::new()
+                .with_push_events(push_events_handler);
+
+            let socket_mode_listener = SlackClientSocketModeListener::new(
+                &SlackClientSocketModeConfig::new(),
+                listener_environment,
+                socket_mode_callbacks,
+            );
+
+            if let Err(e) = socket_mode_listener.listen_for(&app_token).await {
+                error!("Socket mode listener failed to start: {}", e);
+                return;
+            }
+
+            socket_mode_listener.start().await;
+
+            // Wait for shutdown signal instead of using serve() which sets its own Ctrl-C handler
+            shutdown_rx.recv().await;
+
+            socket_mode_listener.shutdown().await;
+        });
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), AgentError> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(()).await;
+        }
+        Ok(())
+    }
+}
+
+async fn push_events_handler(
+    event: SlackPushEventCallback,
+    _client: Arc<SlackHyperClient>,
+    states: SlackClientEventsUserState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    dbg!("Received Slack push event: {:?}", &event);
+
+    if let SlackEventCallbackBody::Message(msg_event) = event.event {
+        let storage = states.read().await;
+        let Some(state) = storage.get_user_state::<SlackListenerUserState>() else {
+            error!("SlackListenerUserState not found in storage");
+            return Ok(());
+        };
+
+        // Apply channel filter if configured
+        if let Some(ref filter) = state.channel_filter {
+            if let Some(ref channel) = msg_event.origin.channel {
+                let channel_str = channel.to_string();
+                if channel_str != *filter && !filter.ends_with(&channel_str) {
+                    return Ok(());
+                }
+            }
+        }
+
+        let message = slack_push_message_to_agent_value(&msg_event);
+
+        if let Err(e) = state.mak.try_send_agent_out(
+            state.id.clone(),
+            AgentContext::new(),
+            PORT_MESSAGE.to_string(),
+            message,
+        ) {
+            error!("Failed to output message: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+fn slack_push_message_to_agent_value(msg: &SlackMessageEvent) -> AgentValue {
+    let mut obj = im::HashMap::new();
+
+    if let Some(ref content) = msg.content {
+        if let Some(ref text) = content.text {
+            obj.insert("text".into(), AgentValue::string(text.clone()));
+        }
+    }
+
+    if let Some(ref user) = msg.sender.user {
+        obj.insert("user".into(), AgentValue::string(user.to_string()));
+    }
+
+    if let Some(ref channel) = msg.origin.channel {
+        obj.insert("channel".into(), AgentValue::string(channel.to_string()));
+    }
+
+    obj.insert("ts".into(), AgentValue::string(msg.origin.ts.to_string()));
+
+    if let Some(ref thread_ts) = msg.origin.thread_ts {
+        obj.insert(
+            "thread_ts".into(),
+            AgentValue::string(thread_ts.to_string()),
+        );
     }
 
     AgentValue::object(obj)

@@ -44,15 +44,28 @@ Lists available Slack channels.
 **Output:**
 - `channels`: Array of channel objects with `id`, `name`, `is_private`, `is_archived`, `is_member`, `num_members`, `topic`, `purpose` fields
 
+### Slack/Listener
+
+Listens to Slack messages in real-time via Socket Mode. Outputs messages as they arrive.
+
+**Configuration:**
+- `channel`: Optional channel filter. If empty, listens to all channels.
+
+**Output:**
+
+- `message`: Message objects with `text`, `user`, `channel`, `ts`, `thread_ts` fields
+
 ## Setup
 
 ### Global Config or Environment Variables
 
 - `SLACK_BOT_TOKEN`: Slack Bot User OAuth Token (starts with `xoxb-`)
+- `SLACK_APP_TOKEN`: Slack App-Level Token with `connections:write` scope (starts with `xapp-`, required for Slack/Listener)
 
 ### Required Slack App Permissions
 
 Bot Token Scopes:
+
 - `channels:history` - View messages in public channels
 - `channels:read` - View basic channel information
 - `chat:write` - Send messages
