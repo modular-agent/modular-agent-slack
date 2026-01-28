@@ -491,8 +491,6 @@ async fn push_events_handler(
     _client: Arc<SlackHyperClient>,
     states: SlackClientEventsUserState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    dbg!("Received Slack push event: {:?}", &event);
-
     if let SlackEventCallbackBody::Message(msg_event) = event.event {
         let storage = states.read().await;
         let Some(state) = storage.get_user_state::<SlackListenerUserState>() else {
