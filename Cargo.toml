@@ -1,0 +1,23 @@
+[package]
+name = "modular-agent-slack"
+version = "0.1.0"
+description = "Slack Agents for Modular Agent Kit"
+authors = ["Akira Ishino <akira@lumilab.jp>"]
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+
+[dependencies]
+futures-util = "0.3"
+im = "15.1.0"
+modular-agent-kit = "0.21.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+slack-morphism = { version = "2", default-features = false, features = ["hyper"] }
+tokio = { version = "1", features = ["sync", "rt"] }
+
+[features]
+default = ["image"]
+image = []
+
+# [patch.crates-io]
+# modular-agent-kit = { path = "../modular-agent-kit/modular-agent-kit" }
