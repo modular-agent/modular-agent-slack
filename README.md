@@ -10,10 +10,6 @@ Posts messages to Slack channels.
 
 **Configuration:**
 - `channel`: Channel name (e.g., `#general`) or channel ID
-- `token`: Bot token. Can be:
-  - Empty: uses `SLACK_BOT_TOKEN` environment variable
-  - `$ENV_NAME`: uses the specified environment variable
-  - Direct token value
 
 **Input:**
 - `message`: String message, or object with `text`, `blocks`, `thread_ts` fields
@@ -27,7 +23,6 @@ Fetches message history from a Slack channel.
 
 **Configuration:**
 - `channel`: Channel name or ID
-- `token`: Bot token (same format as Slack/Post)
 - `limit`: Number of messages to fetch (default: 10)
 
 **Input:**
@@ -41,7 +36,6 @@ Fetches message history from a Slack channel.
 Lists available Slack channels.
 
 **Configuration:**
-- `token`: Bot token (same format as Slack/Post)
 - `limit`: Number of channels to fetch (default: 100)
 
 **Input:**
@@ -52,7 +46,7 @@ Lists available Slack channels.
 
 ## Setup
 
-### Environment Variables
+### Global Config or Environment Variables
 
 - `SLACK_BOT_TOKEN`: Slack Bot User OAuth Token (starts with `xoxb-`)
 
