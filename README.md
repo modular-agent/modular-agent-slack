@@ -1,6 +1,6 @@
 # modular-agent-slack
 
-Slack Agents for [Modular Agent Kit](https://github.com/modular-agent/modular-agent-kit).
+Slack Agents for [Modular Agent](https://github.com/modular-agent/modular-agent-core).
 
 ## Agents
 

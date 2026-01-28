@@ -2,9 +2,9 @@ use std::env;
 use std::sync::{Arc, OnceLock};
 
 use im::{Vector, hashmap};
-use modular_agent_kit::{
-    Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent, MAK,
-    async_trait, modular_agent,
+use modular_agent_core::{
+    Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent,
+    ModularAgent, async_trait, modular_agent,
 };
 use slack_morphism::prelude::*;
 use tokio::sync::mpsc;
@@ -37,8 +37,8 @@ fn get_client() -> &'static SlackClient<HyperConnector> {
     })
 }
 
-fn get_token(mak: &MAK) -> Result<SlackApiToken, AgentError> {
-    let token_str = if let Some(global_token) = mak
+fn get_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
+    let token_str = if let Some(global_token) = ma
         .get_global_configs(SlackPostAgent::DEF_NAME)
         .and_then(|cfg| cfg.get_string(CONFIG_SLACK_BOT_TOKEN).ok())
         .filter(|key| !key.is_empty())
@@ -52,8 +52,8 @@ fn get_token(mak: &MAK) -> Result<SlackApiToken, AgentError> {
     Ok(SlackApiToken::new(SlackApiTokenValue(token_str)))
 }
 
-fn get_app_token(mak: &MAK) -> Result<SlackApiToken, AgentError> {
-    let token_str = if let Some(global_token) = mak
+fn get_app_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
+    let token_str = if let Some(global_token) = ma
         .get_global_configs(SlackListenerAgent::DEF_NAME)
         .and_then(|cfg| cfg.get_string(CONFIG_SLACK_APP_TOKEN).ok())
         .filter(|key| !key.is_empty())
@@ -91,9 +91,9 @@ struct SlackPostAgent {
 
 #[async_trait]
 impl AsAgent for SlackPostAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 
@@ -111,7 +111,7 @@ impl AsAgent for SlackPostAgent {
             ));
         }
 
-        let token = get_token(self.mak())?;
+        let token = get_token(self.ma())?;
         let client = get_client();
         let session = client.open_session(&token);
 
@@ -209,9 +209,9 @@ struct SlackHistoryAgent {
 
 #[async_trait]
 impl AsAgent for SlackHistoryAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 
@@ -229,7 +229,7 @@ impl AsAgent for SlackHistoryAgent {
             ));
         }
 
-        let token = get_token(self.mak())?;
+        let token = get_token(self.ma())?;
         let limit = config.get_integer_or_default(CONFIG_LIMIT);
         let limit = if limit <= 0 { 10 } else { limit as u16 };
 
@@ -304,9 +304,9 @@ struct SlackChannelsAgent {
 
 #[async_trait]
 impl AsAgent for SlackChannelsAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
         })
     }
 
@@ -317,7 +317,7 @@ impl AsAgent for SlackChannelsAgent {
         _value: AgentValue,
     ) -> Result<(), AgentError> {
         let config = self.configs()?;
-        let token = get_token(self.mak())?;
+        let token = get_token(self.ma())?;
         let limit = config.get_integer_or_default(CONFIG_LIMIT);
         let limit = if limit <= 0 { 100 } else { limit as u16 };
 
@@ -408,16 +408,16 @@ struct SlackListenerAgent {
 }
 
 struct SlackListenerUserState {
-    mak: MAK,
+    ma: ModularAgent,
     id: String,
     channel_filter: Option<String>,
 }
 
 #[async_trait]
 impl AsAgent for SlackListenerAgent {
-    fn new(mak: MAK, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
         Ok(Self {
-            data: AgentData::new(mak, id, spec),
+            data: AgentData::new(ma, id, spec),
             shutdown_tx: None,
         })
     }
@@ -431,19 +431,19 @@ impl AsAgent for SlackListenerAgent {
             Some(channel_filter)
         };
 
-        let app_token = get_app_token(self.mak())?;
+        let app_token = get_app_token(self.ma())?;
 
         let client = Arc::new(get_client().clone());
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx);
 
-        let mak = self.mak().clone();
+        let ma = self.ma().clone();
         let id = self.id().to_string();
 
         tokio::spawn(async move {
             let user_state = SlackListenerUserState {
-                mak,
+                ma,
                 id,
                 channel_filter,
             };
@@ -453,8 +453,8 @@ impl AsAgent for SlackListenerAgent {
                     .with_user_state(user_state),
             );
 
-            let socket_mode_callbacks = SlackSocketModeListenerCallbacks::new()
-                .with_push_events(push_events_handler);
+            let socket_mode_callbacks =
+                SlackSocketModeListenerCallbacks::new().with_push_events(push_events_handler);
 
             let socket_mode_listener = SlackClientSocketModeListener::new(
                 &SlackClientSocketModeConfig::new(),
@@ -510,7 +510,7 @@ async fn push_events_handler(
 
         let message = slack_push_message_to_agent_value(&msg_event);
 
-        if let Err(e) = state.mak.try_send_agent_out(
+        if let Err(e) = state.ma.try_send_agent_out(
             state.id.clone(),
             AgentContext::new(),
             PORT_MESSAGE.to_string(),
