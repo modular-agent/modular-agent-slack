@@ -1,6 +1,6 @@
 # modular-agent-slack
 
-[Modular Agent Kit](https://github.com/modular-agent/modular-agent-kit) 用の Slack エージェント。
+[Modular Agent](https://github.com/modular-agent/modular-agent-core) 用の Slack エージェント。
 
 ## エージェント
 
