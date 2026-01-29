@@ -411,6 +411,7 @@ struct SlackListenerUserState {
     ma: ModularAgent,
     id: String,
     channel_filter: Option<String>,
+    bot_user_id: SlackUserId,
 }
 
 #[async_trait]
@@ -423,6 +424,16 @@ impl AsAgent for SlackListenerAgent {
     }
 
     async fn start(&mut self) -> Result<(), AgentError> {
+        let client = Arc::new(get_client().clone());
+
+        let bot_token = get_token(self.ma())?;
+        let bot_session = client.open_session(&bot_token);
+        let bot_user_id = bot_session
+            .auth_test()
+            .await
+            .map_err(|e| AgentError::IoError(format!("Slack API error during auth_test: {}", e)))?
+            .user_id;
+
         let config = self.configs()?;
         let channel_filter = config.get_string_or_default(CONFIG_CHANNEL);
         let channel_filter = if channel_filter.is_empty() {
@@ -432,8 +443,6 @@ impl AsAgent for SlackListenerAgent {
         };
 
         let app_token = get_app_token(self.ma())?;
-
-        let client = Arc::new(get_client().clone());
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx);
@@ -446,6 +455,7 @@ impl AsAgent for SlackListenerAgent {
                 ma,
                 id,
                 channel_filter,
+                bot_user_id,
             };
 
             let listener_environment = Arc::new(
@@ -508,32 +518,39 @@ async fn push_events_handler(
             }
         }
 
-        let message = slack_push_message_to_agent_value(&msg_event);
-
-        if let Err(e) = state.ma.try_send_agent_out(
-            state.id.clone(),
-            AgentContext::new(),
-            PORT_MESSAGE.to_string(),
-            message,
-        ) {
-            error!("Failed to output message: {}", e);
+        if let Some(message) = slack_push_message_to_agent_value(state, &msg_event) {
+            if let Err(e) = state.ma.try_send_agent_out(
+                state.id.clone(),
+                AgentContext::new(),
+                PORT_MESSAGE.to_string(),
+                message,
+            ) {
+                error!("Failed to output message: {}", e);
+            }
         }
     }
 
     Ok(())
 }
 
-fn slack_push_message_to_agent_value(msg: &SlackMessageEvent) -> AgentValue {
+fn slack_push_message_to_agent_value(
+    state: &SlackListenerUserState,
+    msg: &SlackMessageEvent,
+) -> Option<AgentValue> {
     let mut obj = im::HashMap::new();
+
+    if let Some(ref user) = msg.sender.user {
+        if user == &state.bot_user_id {
+            // Ignore messages sent by the bot itself
+            return None;
+        }
+        obj.insert("user".into(), AgentValue::string(user.to_string()));
+    }
 
     if let Some(ref content) = msg.content {
         if let Some(ref text) = content.text {
             obj.insert("text".into(), AgentValue::string(text.clone()));
         }
-    }
-
-    if let Some(ref user) = msg.sender.user {
-        obj.insert("user".into(), AgentValue::string(user.to_string()));
     }
 
     if let Some(ref channel) = msg.origin.channel {
@@ -549,5 +566,5 @@ fn slack_push_message_to_agent_value(msg: &SlackMessageEvent) -> AgentValue {
         );
     }
 
-    AgentValue::object(obj)
+    Some(AgentValue::object(obj))
 }
