@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use im::{Vector, hashmap};
 use modular_agent_core::{
     Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent,
-    ModularAgent, async_trait, modular_agent,
+    Message, ModularAgent, async_trait, modular_agent,
 };
 use slack_morphism::prelude::*;
 use tokio::sync::mpsc;
@@ -12,10 +12,12 @@ use tracing::error;
 
 static CATEGORY: &str = "Slack";
 
-static PORT_MESSAGE: &str = "message";
 static PORT_RESULT: &str = "result";
 static PORT_TRIGGER: &str = "trigger";
-static PORT_MESSAGES: &str = "messages";
+static PORT_MESSAGE: &str = "message";
+static PORT_VALUE: &str = "value";
+static PORT_VALUES: &str = "values";
+static PORT_CHANNELS: &str = "channels";
 
 static CONFIG_CHANNEL: &str = "channel";
 static CONFIG_LIMIT: &str = "limit";
@@ -156,6 +158,7 @@ fn extract_message_content(
 ) -> Result<(String, Option<AgentValue>, Option<String>), AgentError> {
     match value {
         AgentValue::String(s) => Ok((s.to_string(), None, None)),
+        AgentValue::Message(msg) => Ok((msg.content.clone(), None, None)),
         AgentValue::Object(obj) => {
             let text = obj
                 .get("text")
@@ -172,8 +175,11 @@ fn extract_message_content(
         AgentValue::Array(arr) => {
             let texts: Vec<String> = arr
                 .iter()
-                .filter_map(|v| v.as_str())
-                .map(String::from)
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .or_else(|| v.as_message().map(|m| m.content.clone()))
+                })
                 .collect();
             Ok((texts.join("\n"), None, None))
         }
@@ -194,12 +200,12 @@ fn extract_message_content(
 /// - `trigger`: Any value triggers fetching the history
 ///
 /// # Output
-/// - `messages`: Array of message objects containing `text`, `user`, `ts`, etc.
+/// - `values`: Array of Slack message objects containing `text`, `user`, `ts`, etc.
 #[modular_agent(
     title = "History",
     category = CATEGORY,
     inputs = [PORT_TRIGGER],
-    outputs = [PORT_MESSAGES],
+    outputs = [PORT_VALUES],
     string_config(name = CONFIG_CHANNEL),
     integer_config(name = CONFIG_LIMIT),
 )]
@@ -252,7 +258,7 @@ impl AsAgent for SlackHistoryAgent {
             .map(slack_message_to_agent_value)
             .collect();
 
-        self.output(ctx, PORT_MESSAGES, AgentValue::array(messages))
+        self.output(ctx, PORT_VALUES, AgentValue::array(messages))
             .await
     }
 }
@@ -295,7 +301,7 @@ fn slack_message_to_agent_value(msg: &SlackHistoryMessage) -> AgentValue {
     title = "Channels",
     category = CATEGORY,
     inputs = [PORT_TRIGGER],
-    outputs = ["channels"],
+    outputs = [PORT_CHANNELS],
     integer_config(name = CONFIG_LIMIT),
 )]
 struct SlackChannelsAgent {
@@ -337,7 +343,7 @@ impl AsAgent for SlackChannelsAgent {
             .map(slack_channel_to_agent_value)
             .collect();
 
-        self.output(ctx, "channels", AgentValue::array(channels))
+        self.output(ctx, PORT_CHANNELS, AgentValue::array(channels))
             .await
     }
 }
@@ -390,7 +396,7 @@ fn slack_channel_to_agent_value(ch: &SlackChannelInfo) -> AgentValue {
 /// - `channel`: Optional channel filter. If empty, listens to all channels.
 ///
 /// # Output
-/// - `message`: Message objects containing `text`, `user`, `channel`, `ts`, `thread_ts` fields
+/// - `value`: Slack Message objects containing `text`, `user`, `channel`, `ts`, `thread_ts` fields
 ///
 /// # Required Tokens
 /// - `SLACK_BOT_TOKEN`: Bot User OAuth Token (via global config or environment)
@@ -398,7 +404,7 @@ fn slack_channel_to_agent_value(ch: &SlackChannelInfo) -> AgentValue {
 #[modular_agent(
     title = "Listener",
     category = CATEGORY,
-    outputs = [PORT_MESSAGE],
+    outputs = [PORT_VALUE],
     string_config(name = CONFIG_CHANNEL),
     string_global_config(name = CONFIG_SLACK_APP_TOKEN, title = "Slack App Token"),
 )]
@@ -522,7 +528,7 @@ async fn push_events_handler(
             if let Err(e) = state.ma.try_send_agent_out(
                 state.id.clone(),
                 AgentContext::new(),
-                PORT_MESSAGE.to_string(),
+                PORT_VALUE.to_string(),
                 message,
             ) {
                 error!("Failed to output message: {}", e);
@@ -567,4 +573,72 @@ fn slack_push_message_to_agent_value(
     }
 
     Some(AgentValue::object(obj))
+}
+
+/// Agent for converting Slack messages to LLM Message format.
+///
+/// Converts Slack message objects (with `text`, `user`, `channel`, `ts` fields)
+/// into AgentValue::Message format suitable for LLM agents.
+///
+/// # Input
+/// - `value`: Single Slack message object or array of Slack message objects
+///
+/// # Output
+/// - `message`: AgentValue::Message or array of AgentValue::Message
+#[modular_agent(
+    title = "ToMessage",
+    category = CATEGORY,
+    inputs = [PORT_VALUE],
+    outputs = [PORT_MESSAGE],
+)]
+struct SlackToMessageAgent {
+    data: AgentData,
+}
+
+#[async_trait]
+impl AsAgent for SlackToMessageAgent {
+    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+        Ok(Self {
+            data: AgentData::new(ma, id, spec),
+        })
+    }
+
+    async fn process(
+        &mut self,
+        ctx: AgentContext,
+        _port: String,
+        value: AgentValue,
+    ) -> Result<(), AgentError> {
+        if value.is_array() {
+            let arr = value.as_array().unwrap();
+            let messages: im::Vector<AgentValue> = arr
+                .iter()
+                .filter_map(|v| slack_value_to_message(v).ok())
+                .map(AgentValue::message)
+                .collect();
+            self.output(ctx, PORT_MESSAGE, AgentValue::array(messages))
+                .await
+        } else {
+            let message = slack_value_to_message(&value)?;
+            self.output(ctx, PORT_MESSAGE, AgentValue::message(message))
+                .await
+        }
+    }
+}
+
+fn slack_value_to_message(value: &AgentValue) -> Result<Message, AgentError> {
+    match value {
+        AgentValue::String(s) => Ok(Message::user(s.to_string())),
+        AgentValue::Object(obj) => {
+            let text = obj
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Message::user(text))
+        }
+        _ => Err(AgentError::InvalidValue(
+            "Expected string or object for Slack message".to_string(),
+        )),
+    }
 }
