@@ -2,6 +2,7 @@ use std::env;
 use std::sync::{Arc, OnceLock};
 
 use im::{Vector, hashmap};
+use modular_agent_core::photon_rs::PhotonImage;
 use modular_agent_core::{
     Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent,
     Message, ModularAgent, async_trait, modular_agent,
@@ -179,7 +180,7 @@ impl AsAgent for SlackPostAgent {
 #[cfg(feature = "image")]
 async fn upload_image_to_slack(
     session: &SlackClientSession<'_, HyperConnector>,
-    image: &photon_rs::PhotonImage,
+    image: &PhotonImage,
     channel_id: &SlackChannelId,
     initial_comment: Option<String>,
     thread_ts: Option<String>,
