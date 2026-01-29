@@ -116,10 +116,33 @@ impl AsAgent for SlackPostAgent {
         let token = get_token(self.ma())?;
         let client = get_client();
         let session = client.open_session(&token);
+        let channel_id: SlackChannelId = channel.clone().into();
+
+        // Handle image upload
+        #[cfg(feature = "image")]
+        if let Some(image) = value.as_image() {
+            let result = upload_image_to_slack(&session, image, &channel_id, None, None).await?;
+            return self.output(ctx, PORT_RESULT, result).await;
+        }
+
+        // Handle Message with image
+        #[cfg(feature = "image")]
+        if let Some(msg) = value.as_message() {
+            if let Some(ref image) = msg.image {
+                let initial_comment = if msg.content.is_empty() {
+                    None
+                } else {
+                    Some(msg.content.clone())
+                };
+                let result =
+                    upload_image_to_slack(&session, image, &channel_id, initial_comment, None)
+                        .await?;
+                return self.output(ctx, PORT_RESULT, result).await;
+            }
+        }
 
         let (text, blocks, thread_ts) = extract_message_content(&value)?;
 
-        let channel_id: SlackChannelId = channel.into();
         let content = SlackMessageContent::new().with_text(text);
 
         let mut request = SlackApiChatPostMessageRequest::new(channel_id, content);
@@ -151,6 +174,75 @@ impl AsAgent for SlackPostAgent {
 
         self.output(ctx, PORT_RESULT, result).await
     }
+}
+
+#[cfg(feature = "image")]
+async fn upload_image_to_slack(
+    session: &SlackClientSession<'_, HyperConnector>,
+    image: &photon_rs::PhotonImage,
+    channel_id: &SlackChannelId,
+    initial_comment: Option<String>,
+    thread_ts: Option<String>,
+) -> Result<AgentValue, AgentError> {
+    use slack_morphism::api::{
+        SlackApiFilesComplete, SlackApiFilesCompleteUploadExternalRequest,
+        SlackApiFilesGetUploadUrlExternalRequest, SlackApiFilesUploadViaUrlRequest,
+    };
+
+    // Convert image to PNG bytes
+    let png_bytes = image.get_bytes();
+    let filename = format!("image_{}.png", chrono::Utc::now().timestamp_millis());
+
+    // Step 1: Get upload URL
+    let upload_url_request =
+        SlackApiFilesGetUploadUrlExternalRequest::new(filename.clone(), png_bytes.len());
+
+    let upload_url_response = session
+        .get_upload_url_external(&upload_url_request)
+        .await
+        .map_err(|e| AgentError::IoError(format!("Failed to get upload URL: {}", e)))?;
+
+    // Step 2: Upload file content
+    let upload_request = SlackApiFilesUploadViaUrlRequest::new(
+        upload_url_response.upload_url,
+        png_bytes,
+        "image/png".to_string(),
+    );
+
+    session
+        .files_upload_via_url(&upload_request)
+        .await
+        .map_err(|e| AgentError::IoError(format!("Failed to upload file: {}", e)))?;
+
+    // Step 3: Complete upload
+    let file_complete = SlackApiFilesComplete::new(upload_url_response.file_id.clone());
+    let mut complete_request = SlackApiFilesCompleteUploadExternalRequest::new(vec![file_complete])
+        .with_channel_id(channel_id.clone());
+
+    if let Some(comment) = initial_comment {
+        complete_request = complete_request.with_initial_comment(comment);
+    }
+
+    if let Some(ts) = thread_ts {
+        complete_request = complete_request.with_thread_ts(ts.into());
+    }
+
+    let complete_response = session
+        .files_complete_upload_external(&complete_request)
+        .await
+        .map_err(|e| AgentError::IoError(format!("Failed to complete upload: {}", e)))?;
+
+    let file_id = complete_response
+        .files
+        .first()
+        .map(|f| f.id.to_string())
+        .unwrap_or_default();
+
+    Ok(AgentValue::object(hashmap! {
+        "ok".into() => AgentValue::boolean(true),
+        "file_id".into() => AgentValue::string(file_id),
+        "channel".into() => AgentValue::string(channel_id.to_string()),
+    }))
 }
 
 fn extract_message_content(
