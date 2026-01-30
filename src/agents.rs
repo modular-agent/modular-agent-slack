@@ -1,5 +1,7 @@
 use std::env;
-use std::sync::{Arc, OnceLock};
+#[cfg(feature = "image")]
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use im::{Vector, hashmap};
 use modular_agent_core::photon_rs::PhotonImage;
@@ -511,6 +513,7 @@ struct SlackListenerUserState {
     id: String,
     channel_filter: Option<String>,
     bot_user_id: SlackUserId,
+    bot_token: String,
 }
 
 #[async_trait]
@@ -548,6 +551,7 @@ impl AsAgent for SlackListenerAgent {
 
         let ma = self.ma().clone();
         let id = self.id().to_string();
+        let bot_token_str = bot_token.token_value.0.clone();
 
         tokio::spawn(async move {
             let user_state = SlackListenerUserState {
@@ -555,6 +559,7 @@ impl AsAgent for SlackListenerAgent {
                 id,
                 channel_filter,
                 bot_user_id,
+                bot_token: bot_token_str,
             };
 
             let listener_environment = Arc::new(
@@ -617,9 +622,28 @@ async fn push_events_handler(
             }
         }
 
-        if let Some(message) = slack_push_message_to_agent_value(state, &msg_event) {
-            if let Err(e) = state.ma.try_send_agent_out(
-                state.id.clone(),
+        // Clone necessary data before releasing the lock
+        let bot_user_id = state.bot_user_id.clone();
+        let bot_token = state.bot_token.clone();
+        let ma = state.ma.clone();
+        let id = state.id.clone();
+
+        // Check if bot's own message
+        if let Some(ref user) = msg_event.sender.user {
+            if user == &bot_user_id {
+                return Ok(());
+            }
+        }
+
+        // Download image if present
+        #[cfg(feature = "image")]
+        let image = download_first_image(&msg_event, &bot_token).await;
+        #[cfg(not(feature = "image"))]
+        let image: Option<PhotonImage> = None;
+
+        if let Some(message) = slack_push_message_to_agent_value(&msg_event, image) {
+            if let Err(e) = ma.try_send_agent_out(
+                id,
                 AgentContext::new(),
                 PORT_VALUE.to_string(),
                 message,
@@ -632,40 +656,114 @@ async fn push_events_handler(
     Ok(())
 }
 
+#[cfg(feature = "image")]
+async fn download_first_image(msg: &SlackMessageEvent, bot_token: &str) -> Option<PhotonImage> {
+    let files = msg.content.as_ref()?.files.as_ref()?;
+
+    for file in files {
+        let mimetype = file.mimetype.as_ref()?;
+        if !mimetype.0.starts_with("image/") {
+            continue;
+        }
+
+        let url = file.url_private_download.as_ref().or(file.url_private.as_ref())?;
+
+        match download_slack_file(url.as_str(), bot_token).await {
+            Ok(bytes) => {
+                let image = PhotonImage::new_from_byteslice(bytes);
+                return Some(image);
+            }
+            Err(e) => {
+                error!("Failed to download image: {}", e);
+                continue;
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(feature = "image")]
+async fn download_slack_file(url: &str, bot_token: &str) -> Result<Vec<u8>, AgentError> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", bot_token))
+        .send()
+        .await
+        .map_err(|e| AgentError::IoError(format!("Failed to fetch file: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(AgentError::IoError(format!(
+            "Failed to download file: HTTP {}",
+            response.status()
+        )));
+    }
+
+    response
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| AgentError::IoError(format!("Failed to read file bytes: {}", e)))
+}
+
 fn slack_push_message_to_agent_value(
-    state: &SlackListenerUserState,
     msg: &SlackMessageEvent,
+    #[allow(unused_variables)] image: Option<PhotonImage>,
 ) -> Option<AgentValue> {
-    let mut obj = im::HashMap::new();
+    let text = msg
+        .content
+        .as_ref()
+        .and_then(|c| c.text.clone())
+        .unwrap_or_default();
 
-    if let Some(ref user) = msg.sender.user {
-        if user == &state.bot_user_id {
-            // Ignore messages sent by the bot itself
-            return None;
+    let channel = msg
+        .origin
+        .channel
+        .as_ref()
+        .map(|c| c.to_string())
+        .unwrap_or_default();
+
+    let ts = msg.origin.ts.to_string();
+
+    let thread_ts = msg.origin.thread_ts.as_ref().map(|t| t.to_string());
+
+    let user = msg.sender.user.as_ref().map(|u| u.to_string());
+
+    #[cfg(feature = "image")]
+    {
+        let mut message = Message::user(text);
+        message.image = image.map(Arc::new);
+
+        let mut obj = im::HashMap::new();
+        obj.insert("message".into(), AgentValue::message(message));
+        if let Some(user) = user {
+            obj.insert("user".into(), AgentValue::string(user));
         }
-        obj.insert("user".into(), AgentValue::string(user.to_string()));
-    }
-
-    if let Some(ref content) = msg.content {
-        if let Some(ref text) = content.text {
-            obj.insert("text".into(), AgentValue::string(text.clone()));
+        obj.insert("channel".into(), AgentValue::string(channel));
+        obj.insert("ts".into(), AgentValue::string(ts));
+        if let Some(thread_ts) = thread_ts {
+            obj.insert("thread_ts".into(), AgentValue::string(thread_ts));
         }
+        Some(AgentValue::object(obj))
     }
 
-    if let Some(ref channel) = msg.origin.channel {
-        obj.insert("channel".into(), AgentValue::string(channel.to_string()));
+    #[cfg(not(feature = "image"))]
+    {
+        let message = Message::user(text);
+
+        let mut obj = im::HashMap::new();
+        obj.insert("message".into(), AgentValue::message(message));
+        if let Some(user) = user {
+            obj.insert("user".into(), AgentValue::string(user));
+        }
+        obj.insert("channel".into(), AgentValue::string(channel));
+        obj.insert("ts".into(), AgentValue::string(ts));
+        if let Some(thread_ts) = thread_ts {
+            obj.insert("thread_ts".into(), AgentValue::string(thread_ts));
+        }
+        Some(AgentValue::object(obj))
     }
-
-    obj.insert("ts".into(), AgentValue::string(msg.origin.ts.to_string()));
-
-    if let Some(ref thread_ts) = msg.origin.thread_ts {
-        obj.insert(
-            "thread_ts".into(),
-            AgentValue::string(thread_ts.to_string()),
-        );
-    }
-
-    Some(AgentValue::object(obj))
 }
 
 /// Agent for converting Slack messages to LLM Message format.
@@ -722,7 +820,13 @@ impl AsAgent for SlackToMessageAgent {
 fn slack_value_to_message(value: &AgentValue) -> Result<Message, AgentError> {
     match value {
         AgentValue::String(s) => Ok(Message::user(s.to_string())),
+        AgentValue::Message(msg) => Ok(Message::clone(msg)),
         AgentValue::Object(obj) => {
+            // New format: check for "message" field first
+            if let Some(msg) = obj.get("message").and_then(|v| v.as_message()) {
+                return Ok(Message::clone(msg));
+            }
+            // Legacy format: use "text" field
             let text = obj
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -731,7 +835,7 @@ fn slack_value_to_message(value: &AgentValue) -> Result<Message, AgentError> {
             Ok(Message::user(text))
         }
         _ => Err(AgentError::InvalidValue(
-            "Expected string or object for Slack message".to_string(),
+            "Expected string, message, or object for Slack message".to_string(),
         )),
     }
 }
