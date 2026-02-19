@@ -13,6 +13,8 @@ use slack_morphism::prelude::*;
 use tokio::sync::mpsc;
 use tracing::error;
 
+use crate::mrkdwn;
+
 static CATEGORY: &str = "Slack";
 
 static PORT_RESULT: &str = "result";
@@ -24,6 +26,7 @@ static PORT_CHANNELS: &str = "channels";
 
 static CONFIG_CHANNEL: &str = "channel";
 static CONFIG_LIMIT: &str = "limit";
+static CONFIG_CONVERT_MARKDOWN: &str = "convert_markdown";
 static CONFIG_SLACK_BOT_TOKEN: &str = "slack_bot_token";
 static CONFIG_SLACK_APP_TOKEN: &str = "slack_app_token";
 
@@ -88,6 +91,7 @@ fn get_app_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
     inputs = [PORT_MESSAGE],
     outputs = [PORT_RESULT],
     string_config(name = CONFIG_CHANNEL),
+    boolean_config(name = CONFIG_CONVERT_MARKDOWN, default = true),
     custom_global_config(name = CONFIG_SLACK_BOT_TOKEN, type_ = "password", default = AgentValue::string(""), title = "Slack Bot Token"),
 )]
 struct SlackPostAgent {
@@ -115,6 +119,7 @@ impl AsAgent for SlackPostAgent {
                 "Channel not configured".to_string(),
             ));
         }
+        let convert = config.get_bool_or(CONFIG_CONVERT_MARKDOWN, true);
 
         let token = get_token(self.ma())?;
         let client = get_client();
@@ -130,21 +135,27 @@ impl AsAgent for SlackPostAgent {
 
         // Handle Message with image
         #[cfg(feature = "image")]
-        if let Some(msg) = value.as_message() {
-            if let Some(ref image) = msg.image {
-                let initial_comment = if msg.content.is_empty() {
-                    None
-                } else {
-                    Some(msg.content.clone())
-                };
-                let result =
-                    upload_image_to_slack(&session, image, &channel_id, initial_comment, None)
-                        .await?;
-                return self.output(ctx, PORT_RESULT, result).await;
-            }
+        if let Some(msg) = value.as_message()
+            && let Some(ref image) = msg.image
+        {
+            let initial_comment = if msg.content.is_empty() {
+                None
+            } else if convert {
+                Some(mrkdwn::md_to_mrkdwn(&msg.content))
+            } else {
+                Some(msg.content.clone())
+            };
+            let result =
+                upload_image_to_slack(&session, image, &channel_id, initial_comment, None).await?;
+            return self.output(ctx, PORT_RESULT, result).await;
         }
 
         let (text, blocks, thread_ts) = extract_message_content(&value)?;
+        let text = if convert {
+            mrkdwn::md_to_mrkdwn(&text)
+        } else {
+            text
+        };
 
         let content = SlackMessageContent::new().with_text(text);
 
