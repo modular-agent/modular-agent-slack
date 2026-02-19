@@ -88,7 +88,7 @@ fn get_app_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
     inputs = [PORT_MESSAGE],
     outputs = [PORT_RESULT],
     string_config(name = CONFIG_CHANNEL),
-    string_global_config(name = CONFIG_SLACK_BOT_TOKEN, title = "Slack Bot Token"),
+    custom_global_config(name = CONFIG_SLACK_BOT_TOKEN, type_ = "password", default = AgentValue::string(""), title = "Slack Bot Token"),
 )]
 struct SlackPostAgent {
     data: AgentData,
@@ -501,7 +501,7 @@ fn slack_channel_to_agent_value(ch: &SlackChannelInfo) -> AgentValue {
     category = CATEGORY,
     outputs = [PORT_VALUE],
     string_config(name = CONFIG_CHANNEL),
-    string_global_config(name = CONFIG_SLACK_APP_TOKEN, title = "Slack App Token"),
+    custom_global_config(name = CONFIG_SLACK_APP_TOKEN, type_ = "password", default = AgentValue::string(""), title = "Slack App Token"),
 )]
 struct SlackListenerAgent {
     data: AgentData,
