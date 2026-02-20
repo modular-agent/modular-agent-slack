@@ -1,6 +1,6 @@
 [package]
 name = "modular-agent-slack"
-version = "0.3.0"
+version = "0.3.1"
 description = "Slack Agents for Modular Agent"
 authors = ["Akira Ishino <akira@lumilab.jp>"]
 edition = "2024"
@@ -18,7 +18,7 @@ tokio = { version = "1", features = ["sync", "rt"] }
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true}
 
-modular-agent-core = "0.23.0"
+modular-agent-core = "0.23.1"
 
 [features]
 default = ["image"]
