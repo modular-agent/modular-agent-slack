@@ -36,7 +36,7 @@ static CLIENT: OnceLock<SlackClient<HyperConnector>> = OnceLock::new();
 
 fn get_client() -> &'static SlackClient<HyperConnector> {
     CLIENT.get_or_init(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
+        rustls::crypto::ring::default_provider()
             .install_default()
             .expect("Failed to initialize rustls crypto provider");
         SlackClient::new(
