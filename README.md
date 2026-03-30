@@ -26,7 +26,7 @@ Fetches message history from a Slack channel.
 - `limit`: Number of messages to fetch (default: 10)
 
 **Input:**
-- `trigger`: Any value triggers fetching the history
+- `unit`: Any value triggers fetching the history
 
 **Output:**
 - `messages`: Array of message objects with `text`, `user`, `ts`, `thread_ts` fields
@@ -39,7 +39,7 @@ Lists available Slack channels.
 - `limit`: Number of channels to fetch (default: 100)
 
 **Input:**
-- `trigger`: Any value triggers fetching the channel list
+- `unit`: Any value triggers fetching the channel list
 
 **Output:**
 - `channels`: Array of channel objects with `id`, `name`, `is_private`, `is_archived`, `is_member`, `num_members`, `topic`, `purpose` fields

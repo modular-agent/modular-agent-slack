@@ -18,7 +18,7 @@ use crate::mrkdwn;
 static CATEGORY: &str = "Slack";
 
 static PORT_RESULT: &str = "result";
-static PORT_TRIGGER: &str = "trigger";
+static PORT_UNIT: &str = "unit";
 static PORT_MESSAGE: &str = "message";
 static PORT_VALUE: &str = "value";
 static PORT_VALUES: &str = "values";
@@ -303,14 +303,14 @@ fn extract_message_content(
 /// - `limit`: Maximum number of messages to fetch (default: 10)
 ///
 /// # Input
-/// - `trigger`: Any value triggers fetching the history
+/// - `unit`: Any value triggers fetching the history
 ///
 /// # Output
 /// - `values`: Array of Slack message objects containing `text`, `user`, `ts`, etc.
 #[modular_agent(
     title = "History",
     category = CATEGORY,
-    inputs = [PORT_TRIGGER],
+    inputs = [PORT_UNIT],
     outputs = [PORT_VALUES],
     string_config(name = CONFIG_CHANNEL),
     integer_config(name = CONFIG_LIMIT),
@@ -399,14 +399,14 @@ fn slack_message_to_agent_value(msg: &SlackHistoryMessage) -> AgentValue {
 /// - `limit`: Maximum number of channels to fetch (default: 100)
 ///
 /// # Input
-/// - `trigger`: Any value triggers fetching the channel list
+/// - `unit`: Any value triggers fetching the channel list
 ///
 /// # Output
 /// - `channels`: Array of channel objects containing `id`, `name`, `is_private`, etc.
 #[modular_agent(
     title = "Channels",
     category = CATEGORY,
-    inputs = [PORT_TRIGGER],
+    inputs = [PORT_UNIT],
     outputs = [PORT_CHANNELS],
     integer_config(name = CONFIG_LIMIT),
 )]
