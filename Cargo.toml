@@ -27,3 +27,6 @@ modular-agent-core = "0.23.2"
 [features]
 default = ["image"]
 image = ["modular-agent-core/image", "reqwest"]
+
+[patch.crates-io]
+modular-agent-core = { path = "../modular-agent-core/modular-agent-core" }

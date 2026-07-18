@@ -138,12 +138,13 @@ impl AsAgent for SlackPostAgent {
         if let Some(msg) = value.as_message()
             && let Some(ref image) = msg.image
         {
-            let initial_comment = if msg.content.is_empty() {
+            let text = msg.text();
+            let initial_comment = if text.is_empty() {
                 None
             } else if convert {
-                Some(mrkdwn::md_to_mrkdwn(&msg.content))
+                Some(mrkdwn::md_to_mrkdwn(&text))
             } else {
-                Some(msg.content.clone())
+                Some(text)
             };
             let result =
                 upload_image_to_slack(&session, image, &channel_id, initial_comment, None).await?;
@@ -264,7 +265,7 @@ fn extract_message_content(
 ) -> Result<(String, Option<AgentValue>, Option<String>), AgentError> {
     match value {
         AgentValue::String(s) => Ok((s.to_string(), None, None)),
-        AgentValue::Message(msg) => Ok((msg.content.clone(), None, None)),
+        AgentValue::Message(msg) => Ok((msg.text(), None, None)),
         AgentValue::Object(obj) => {
             let text = obj
                 .get("text")
@@ -284,7 +285,7 @@ fn extract_message_content(
                 .filter_map(|v| {
                     v.as_str()
                         .map(String::from)
-                        .or_else(|| v.as_message().map(|m| m.content.clone()))
+                        .or_else(|| v.as_message().map(|m| m.text()))
                 })
                 .collect();
             Ok((texts.join("\n"), None, None))
@@ -653,12 +654,9 @@ async fn push_events_handler(
         let image: Option<PhotonImage> = None;
 
         if let Some(message) = slack_push_message_to_agent_value(&msg_event, image) {
-            if let Err(e) = ma.try_send_agent_out(
-                id,
-                AgentContext::new(),
-                PORT_VALUE.to_string(),
-                message,
-            ) {
+            if let Err(e) =
+                ma.try_send_agent_out(id, AgentContext::new(), PORT_VALUE.to_string(), message)
+            {
                 error!("Failed to output message: {}", e);
             }
         }
@@ -677,7 +675,10 @@ async fn download_first_image(msg: &SlackMessageEvent, bot_token: &str) -> Optio
             continue;
         }
 
-        let url = file.url_private_download.as_ref().or(file.url_private.as_ref())?;
+        let url = file
+            .url_private_download
+            .as_ref()
+            .or(file.url_private.as_ref())?;
 
         match download_slack_file(url.as_str(), bot_token).await {
             Ok(bytes) => {
