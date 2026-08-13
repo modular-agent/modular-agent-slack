@@ -1,0 +1,3 @@
+name: modular-agent-slack
+description: Slack messaging agents
+default_for: [desktop, cli]
