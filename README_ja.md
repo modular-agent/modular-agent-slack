@@ -6,16 +6,14 @@
 
 ### Slack/Post
 
-Slack チャネルにメッセージを投稿します。
+Slack チャネルにメッセージを投稿します。整形後に空になるメッセージとストリーミング途中の部分メッセージは投稿せずスキップします。
 
 **設定:**
 - `channel`: チャネル名（例: `#general`）またはチャネルID
+- `show_tool_calls`: メッセージ内のツール呼び出しを「Tool Call: \<name\>」行として表示（デフォルト: false）
 
 **入力:**
 - `message`: 文字列メッセージ、または `text`, `blocks`, `thread_ts` フィールドを持つオブジェクト
-
-**出力:**
-- `result`: 成功時に `ok`, `ts`, `channel` を含むオブジェクト
 
 ### Slack/History
 
