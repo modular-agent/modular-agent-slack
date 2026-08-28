@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use im::{Vector, hashmap};
+use im::Vector;
 use modular_agent_core::photon_rs::PhotonImage;
 use modular_agent_core::{
     Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent,
@@ -17,7 +17,6 @@ use crate::mrkdwn;
 
 static CATEGORY: &str = "Slack";
 
-static PORT_RESULT: &str = "result";
 static PORT_UNIT: &str = "unit";
 static PORT_MESSAGE: &str = "message";
 static PORT_VALUE: &str = "value";
@@ -27,6 +26,7 @@ static PORT_CHANNELS: &str = "channels";
 static CONFIG_CHANNEL: &str = "channel";
 static CONFIG_LIMIT: &str = "limit";
 static CONFIG_CONVERT_MARKDOWN: &str = "convert_markdown";
+static CONFIG_SHOW_TOOL_CALLS: &str = "show_tool_calls";
 static CONFIG_SLACK_BOT_TOKEN: &str = "slack_bot_token";
 static CONFIG_SLACK_APP_TOKEN: &str = "slack_app_token";
 
@@ -77,21 +77,22 @@ fn get_app_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
 
 /// Agent for posting messages to Slack channels.
 ///
+/// Messages that are empty after formatting, and partial streaming responses,
+/// are skipped without posting.
+///
 /// # Configuration
 /// - `channel`: The Slack channel name (e.g., "#general") or channel ID
+/// - `show_tool_calls`: Render tool calls in messages as "Tool Call: <name>" lines
 ///
 /// # Input
 /// - `message`: String message or object with `text`, `blocks`, `thread_ts` fields
-///
-/// # Output
-/// - `result`: Object containing `ok`, `ts`, `channel` on success
 #[modular_agent(
     title = "Post",
     category = CATEGORY,
     inputs = [PORT_MESSAGE],
-    outputs = [PORT_RESULT],
     string_config(name = CONFIG_CHANNEL),
     boolean_config(name = CONFIG_CONVERT_MARKDOWN, default = true),
+    boolean_config(name = CONFIG_SHOW_TOOL_CALLS, title = "Show Tool Calls", detail),
     custom_global_config(name = CONFIG_SLACK_BOT_TOKEN, type_ = "password", default = AgentValue::string(""), title = "Slack Bot Token"),
 )]
 struct SlackPostAgent {
@@ -108,7 +109,7 @@ impl AsAgent for SlackPostAgent {
 
     async fn process(
         &mut self,
-        ctx: AgentContext,
+        _ctx: AgentContext,
         _port: String,
         value: AgentValue,
     ) -> Result<(), AgentError> {
@@ -120,6 +121,14 @@ impl AsAgent for SlackPostAgent {
             ));
         }
         let convert = config.get_bool_or(CONFIG_CONVERT_MARKDOWN, true);
+        let show_tool_calls = config.get_bool_or_default(CONFIG_SHOW_TOOL_CALLS);
+
+        // Skip partial streaming responses
+        if let Some(msg) = value.as_message()
+            && msg.streaming
+        {
+            return Ok(());
+        }
 
         let token = get_token(self.ma())?;
         let client = get_client();
@@ -129,8 +138,7 @@ impl AsAgent for SlackPostAgent {
         // Handle image upload
         #[cfg(feature = "image")]
         if let Some(image) = value.as_image() {
-            let result = upload_image_to_slack(&session, image, &channel_id, None, None).await?;
-            return self.output(ctx, PORT_RESULT, result).await;
+            return upload_image_to_slack(&session, image, &channel_id, None, None).await;
         }
 
         // Handle Message with image
@@ -138,7 +146,7 @@ impl AsAgent for SlackPostAgent {
         if let Some(msg) = value.as_message()
             && let Some(ref image) = msg.image
         {
-            let text = msg.text();
+            let text = format_message(msg, show_tool_calls);
             let initial_comment = if text.is_empty() {
                 None
             } else if convert {
@@ -146,17 +154,19 @@ impl AsAgent for SlackPostAgent {
             } else {
                 Some(text)
             };
-            let result =
-                upload_image_to_slack(&session, image, &channel_id, initial_comment, None).await?;
-            return self.output(ctx, PORT_RESULT, result).await;
+            return upload_image_to_slack(&session, image, &channel_id, initial_comment, None)
+                .await;
         }
 
-        let (text, blocks, thread_ts) = extract_message_content(&value)?;
+        let (text, blocks, thread_ts) = extract_message_content(&value, show_tool_calls)?;
         let text = if convert {
             mrkdwn::md_to_mrkdwn(&text)
         } else {
             text
         };
+        if text.is_empty() && blocks.is_none() {
+            return Ok(());
+        }
 
         let content = SlackMessageContent::new().with_text(text);
 
@@ -176,18 +186,12 @@ impl AsAgent for SlackPostAgent {
             request = SlackApiChatPostMessageRequest::new(request.channel, content_with_blocks);
         }
 
-        let response = session
+        session
             .chat_post_message(&request)
             .await
             .map_err(|e| AgentError::IoError(format!("Slack API error: {}", e)))?;
 
-        let result = AgentValue::object(hashmap! {
-            "ok".into() => AgentValue::boolean(true),
-            "ts".into() => AgentValue::string(response.ts.to_string()),
-            "channel".into() => AgentValue::string(response.channel.to_string()),
-        });
-
-        self.output(ctx, PORT_RESULT, result).await
+        Ok(())
     }
 }
 
@@ -198,7 +202,7 @@ async fn upload_image_to_slack(
     channel_id: &SlackChannelId,
     initial_comment: Option<String>,
     thread_ts: Option<String>,
-) -> Result<AgentValue, AgentError> {
+) -> Result<(), AgentError> {
     use slack_morphism::api::{
         SlackApiFilesComplete, SlackApiFilesCompleteUploadExternalRequest,
         SlackApiFilesGetUploadUrlExternalRequest, SlackApiFilesUploadViaUrlRequest,
@@ -242,30 +246,35 @@ async fn upload_image_to_slack(
         complete_request = complete_request.with_thread_ts(ts.into());
     }
 
-    let complete_response = session
+    session
         .files_complete_upload_external(&complete_request)
         .await
         .map_err(|e| AgentError::IoError(format!("Failed to complete upload: {}", e)))?;
 
-    let file_id = complete_response
-        .files
-        .first()
-        .map(|f| f.id.to_string())
-        .unwrap_or_default();
+    Ok(())
+}
 
-    Ok(AgentValue::object(hashmap! {
-        "ok".into() => AgentValue::boolean(true),
-        "file_id".into() => AgentValue::string(file_id),
-        "channel".into() => AgentValue::string(channel_id.to_string()),
-    }))
+fn format_message(msg: &Message, show_tool_calls: bool) -> String {
+    let mut parts: Vec<String> = vec![];
+    let text = msg.text();
+    if !text.is_empty() {
+        parts.push(text);
+    }
+    if show_tool_calls && let Some(tool_calls) = &msg.tool_calls {
+        for call in tool_calls {
+            parts.push(format!("**Tool Call: {}**", call.function.name));
+        }
+    }
+    parts.join("\n\n")
 }
 
 fn extract_message_content(
     value: &AgentValue,
+    show_tool_calls: bool,
 ) -> Result<(String, Option<AgentValue>, Option<String>), AgentError> {
     match value {
         AgentValue::String(s) => Ok((s.to_string(), None, None)),
-        AgentValue::Message(msg) => Ok((msg.text(), None, None)),
+        AgentValue::Message(msg) => Ok((format_message(msg, show_tool_calls), None, None)),
         AgentValue::Object(obj) => {
             let text = obj
                 .get("text")
@@ -283,10 +292,13 @@ fn extract_message_content(
             let texts: Vec<String> = arr
                 .iter()
                 .filter_map(|v| {
-                    v.as_str()
-                        .map(String::from)
-                        .or_else(|| v.as_message().map(|m| m.text()))
+                    v.as_str().map(String::from).or_else(|| {
+                        v.as_message()
+                            .filter(|m| !m.streaming)
+                            .map(|m| format_message(m, show_tool_calls))
+                    })
                 })
+                .filter(|s| !s.is_empty())
                 .collect();
             Ok((texts.join("\n"), None, None))
         }

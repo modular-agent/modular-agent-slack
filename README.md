@@ -6,16 +6,14 @@ Slack Agents for [Modular Agent](https://github.com/modular-agent/modular-agent-
 
 ### Slack/Post
 
-Posts messages to Slack channels.
+Posts messages to Slack channels. Messages that are empty after formatting, and partial streaming responses, are skipped without posting.
 
 **Configuration:**
 - `channel`: Channel name (e.g., `#general`) or channel ID
+- `show_tool_calls`: Render tool calls in messages as "Tool Call: \<name\>" lines (default: false)
 
 **Input:**
 - `message`: String message, or object with `text`, `blocks`, `thread_ts` fields
-
-**Output:**
-- `result`: Object containing `ok`, `ts`, `channel` on success
 
 ### Slack/History
 
