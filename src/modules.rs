@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 use im::Vector;
 use modular_agent_core::photon_rs::PhotonImage;
 use modular_agent_core::{
-    Agent, AgentContext, AgentData, AgentError, AgentOutput, AgentSpec, AgentValue, AsAgent,
-    Message, ModularAgent, async_trait, modular_agent,
+    AsModule, Error, Message, ModularAgent, Module, ModuleContext, ModuleData, ModuleOutput,
+    ModuleSpec, Result, Value, async_trait, modular_agent,
 };
 use slack_morphism::prelude::*;
 use tokio::sync::mpsc;
@@ -45,37 +45,37 @@ fn get_client() -> &'static SlackClient<HyperConnector> {
     })
 }
 
-fn get_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
+fn get_token(ma: &ModularAgent) -> Result<SlackApiToken> {
     let token_str = if let Some(global_token) = ma
-        .get_global_configs(SlackPostAgent::DEF_NAME)
+        .get_global_configs(SlackPostModule::DEF_NAME)
         .and_then(|cfg| cfg.get_string(CONFIG_SLACK_BOT_TOKEN).ok())
         .filter(|key| !key.is_empty())
     {
         global_token
     } else {
         env::var("SLACK_BOT_TOKEN")
-            .map_err(|_| AgentError::InvalidValue("SLACK_BOT_TOKEN not set".to_string()))?
+            .map_err(|_| Error::InvalidValue("SLACK_BOT_TOKEN not set".to_string()))?
     };
 
     Ok(SlackApiToken::new(SlackApiTokenValue(token_str)))
 }
 
-fn get_app_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
+fn get_app_token(ma: &ModularAgent) -> Result<SlackApiToken> {
     let token_str = if let Some(global_token) = ma
-        .get_global_configs(SlackListenerAgent::DEF_NAME)
+        .get_global_configs(SlackListenerModule::DEF_NAME)
         .and_then(|cfg| cfg.get_string(CONFIG_SLACK_APP_TOKEN).ok())
         .filter(|key| !key.is_empty())
     {
         global_token
     } else {
         env::var("SLACK_APP_TOKEN")
-            .map_err(|_| AgentError::InvalidValue("SLACK_APP_TOKEN not set".to_string()))?
+            .map_err(|_| Error::InvalidValue("SLACK_APP_TOKEN not set".to_string()))?
     };
 
     Ok(SlackApiToken::new(SlackApiTokenValue(token_str)))
 }
 
-/// Agent for posting messages to Slack channels.
+/// Module for posting messages to Slack channels.
 ///
 /// Messages that are empty after formatting, and partial streaming responses,
 /// are skipped without posting.
@@ -93,32 +93,25 @@ fn get_app_token(ma: &ModularAgent) -> Result<SlackApiToken, AgentError> {
     string_config(name = CONFIG_CHANNEL),
     boolean_config(name = CONFIG_CONVERT_MARKDOWN, default = true),
     boolean_config(name = CONFIG_SHOW_TOOL_CALLS, title = "Show Tool Calls", detail),
-    custom_global_config(name = CONFIG_SLACK_BOT_TOKEN, type_ = "password", default = AgentValue::string(""), title = "Slack Bot Token"),
+    custom_global_config(name = CONFIG_SLACK_BOT_TOKEN, type_ = "password", default = Value::string(""), title = "Slack Bot Token"),
 )]
-struct SlackPostAgent {
-    data: AgentData,
+struct SlackPostModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for SlackPostAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for SlackPostModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        _ctx: AgentContext,
-        _port: String,
-        value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, _ctx: ModuleContext, _port: String, value: Value) -> Result<()> {
         let config = self.configs()?;
         let channel = config.get_string(CONFIG_CHANNEL)?;
         if channel.is_empty() {
-            return Err(AgentError::InvalidValue(
-                "Channel not configured".to_string(),
-            ));
+            return Err(Error::InvalidValue("Channel not configured".to_string()));
         }
         let convert = config.get_bool_or(CONFIG_CONVERT_MARKDOWN, true);
         let show_tool_calls = config.get_bool_or_default(CONFIG_SHOW_TOOL_CALLS);
@@ -189,7 +182,7 @@ impl AsAgent for SlackPostAgent {
         session
             .chat_post_message(&request)
             .await
-            .map_err(|e| AgentError::IoError(format!("Slack API error: {}", e)))?;
+            .map_err(|e| Error::IoError(format!("Slack API error: {}", e)))?;
 
         Ok(())
     }
@@ -202,7 +195,7 @@ async fn upload_image_to_slack(
     channel_id: &SlackChannelId,
     initial_comment: Option<String>,
     thread_ts: Option<String>,
-) -> Result<(), AgentError> {
+) -> Result<()> {
     use slack_morphism::api::{
         SlackApiFilesComplete, SlackApiFilesCompleteUploadExternalRequest,
         SlackApiFilesGetUploadUrlExternalRequest, SlackApiFilesUploadViaUrlRequest,
@@ -219,7 +212,7 @@ async fn upload_image_to_slack(
     let upload_url_response = session
         .get_upload_url_external(&upload_url_request)
         .await
-        .map_err(|e| AgentError::IoError(format!("Failed to get upload URL: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to get upload URL: {}", e)))?;
 
     // Step 2: Upload file content
     let upload_request = SlackApiFilesUploadViaUrlRequest::new(
@@ -231,7 +224,7 @@ async fn upload_image_to_slack(
     session
         .files_upload_via_url(&upload_request)
         .await
-        .map_err(|e| AgentError::IoError(format!("Failed to upload file: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to upload file: {}", e)))?;
 
     // Step 3: Complete upload
     let file_complete = SlackApiFilesComplete::new(upload_url_response.file_id.clone());
@@ -249,7 +242,7 @@ async fn upload_image_to_slack(
     session
         .files_complete_upload_external(&complete_request)
         .await
-        .map_err(|e| AgentError::IoError(format!("Failed to complete upload: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to complete upload: {}", e)))?;
 
     Ok(())
 }
@@ -269,13 +262,13 @@ fn format_message(msg: &Message, show_tool_calls: bool) -> String {
 }
 
 fn extract_message_content(
-    value: &AgentValue,
+    value: &Value,
     show_tool_calls: bool,
-) -> Result<(String, Option<AgentValue>, Option<String>), AgentError> {
+) -> Result<(String, Option<Value>, Option<String>)> {
     match value {
-        AgentValue::String(s) => Ok((s.to_string(), None, None)),
-        AgentValue::Message(msg) => Ok((format_message(msg, show_tool_calls), None, None)),
-        AgentValue::Object(obj) => {
+        Value::String(s) => Ok((s.to_string(), None, None)),
+        Value::Message(msg) => Ok((format_message(msg, show_tool_calls), None, None)),
+        Value::Object(obj) => {
             let text = obj
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -288,7 +281,7 @@ fn extract_message_content(
                 .map(String::from);
             Ok((text, blocks, thread_ts))
         }
-        AgentValue::Array(arr) => {
+        Value::Array(arr) => {
             let texts: Vec<String> = arr
                 .iter()
                 .filter_map(|v| {
@@ -309,7 +302,7 @@ fn extract_message_content(
     }
 }
 
-/// Agent for fetching message history from a Slack channel.
+/// Module for fetching message history from a Slack channel.
 ///
 /// # Configuration
 /// - `channel`: The Slack channel name or ID to fetch history from
@@ -328,30 +321,23 @@ fn extract_message_content(
     string_config(name = CONFIG_CHANNEL),
     integer_config(name = CONFIG_LIMIT),
 )]
-struct SlackHistoryAgent {
-    data: AgentData,
+struct SlackHistoryModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for SlackHistoryAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for SlackHistoryModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        ctx: AgentContext,
-        _port: String,
-        _value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, ctx: ModuleContext, _port: String, _value: Value) -> Result<()> {
         let config = self.configs()?;
         let channel = config.get_string(CONFIG_CHANNEL)?;
         if channel.is_empty() {
-            return Err(AgentError::InvalidValue(
-                "Channel not configured".to_string(),
-            ));
+            return Err(Error::InvalidValue("Channel not configured".to_string()));
         }
 
         let token = get_token(self.ma())?;
@@ -369,44 +355,40 @@ impl AsAgent for SlackHistoryAgent {
         let response = session
             .conversations_history(&request)
             .await
-            .map_err(|e| AgentError::IoError(format!("Slack API error: {}", e)))?;
+            .map_err(|e| Error::IoError(format!("Slack API error: {}", e)))?;
 
-        let messages: Vector<AgentValue> = response
+        let messages: Vector<Value> = response
             .messages
             .iter()
-            .map(slack_message_to_agent_value)
+            .map(slack_message_to_value)
             .collect();
 
-        self.output(ctx, PORT_VALUES, AgentValue::array(messages))
-            .await
+        self.output(ctx, PORT_VALUES, Value::array(messages)).await
     }
 }
 
-fn slack_message_to_agent_value(msg: &SlackHistoryMessage) -> AgentValue {
+fn slack_message_to_value(msg: &SlackHistoryMessage) -> Value {
     let mut obj = im::HashMap::new();
 
     // SlackHistoryMessage uses #[serde(flatten)] so fields are directly accessible
     if let Some(text) = &msg.content.text {
-        obj.insert("text".into(), AgentValue::string(text.clone()));
+        obj.insert("text".into(), Value::string(text.clone()));
     }
 
     if let Some(user) = &msg.sender.user {
-        obj.insert("user".into(), AgentValue::string(user.to_string()));
+        obj.insert("user".into(), Value::string(user.to_string()));
     }
 
-    obj.insert("ts".into(), AgentValue::string(msg.origin.ts.to_string()));
+    obj.insert("ts".into(), Value::string(msg.origin.ts.to_string()));
 
     if let Some(thread_ts) = &msg.origin.thread_ts {
-        obj.insert(
-            "thread_ts".into(),
-            AgentValue::string(thread_ts.to_string()),
-        );
+        obj.insert("thread_ts".into(), Value::string(thread_ts.to_string()));
     }
 
-    AgentValue::object(obj)
+    Value::object(obj)
 }
 
-/// Agent for listing Slack channels.
+/// Module for listing Slack channels.
 ///
 /// # Configuration
 /// - `limit`: Maximum number of channels to fetch (default: 100)
@@ -423,24 +405,19 @@ fn slack_message_to_agent_value(msg: &SlackHistoryMessage) -> AgentValue {
     outputs = [PORT_CHANNELS],
     integer_config(name = CONFIG_LIMIT),
 )]
-struct SlackChannelsAgent {
-    data: AgentData,
+struct SlackChannelsModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for SlackChannelsAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for SlackChannelsModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        ctx: AgentContext,
-        _port: String,
-        _value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, ctx: ModuleContext, _port: String, _value: Value) -> Result<()> {
         let config = self.configs()?;
         let token = get_token(self.ma())?;
         let limit = config.get_integer_or_default(CONFIG_LIMIT);
@@ -454,62 +431,59 @@ impl AsAgent for SlackChannelsAgent {
         let response = session
             .conversations_list(&request)
             .await
-            .map_err(|e| AgentError::IoError(format!("Slack API error: {}", e)))?;
+            .map_err(|e| Error::IoError(format!("Slack API error: {}", e)))?;
 
-        let channels: Vector<AgentValue> = response
+        let channels: Vector<Value> = response
             .channels
             .iter()
-            .map(slack_channel_to_agent_value)
+            .map(slack_channel_to_value)
             .collect();
 
-        self.output(ctx, PORT_CHANNELS, AgentValue::array(channels))
+        self.output(ctx, PORT_CHANNELS, Value::array(channels))
             .await
     }
 }
 
-fn slack_channel_to_agent_value(ch: &SlackChannelInfo) -> AgentValue {
+fn slack_channel_to_value(ch: &SlackChannelInfo) -> Value {
     let mut obj = im::HashMap::new();
 
-    obj.insert("id".into(), AgentValue::string(ch.id.to_string()));
+    obj.insert("id".into(), Value::string(ch.id.to_string()));
 
     if let Some(name) = &ch.name {
-        obj.insert("name".into(), AgentValue::string(name.clone()));
+        obj.insert("name".into(), Value::string(name.clone()));
     }
 
     // Access flags fields directly (they are Option<bool>)
     if let Some(is_private) = ch.flags.is_private {
-        obj.insert("is_private".into(), AgentValue::boolean(is_private));
+        obj.insert("is_private".into(), Value::boolean(is_private));
     }
 
     if let Some(is_archived) = ch.flags.is_archived {
-        obj.insert("is_archived".into(), AgentValue::boolean(is_archived));
+        obj.insert("is_archived".into(), Value::boolean(is_archived));
     }
 
     if let Some(is_member) = ch.flags.is_member {
-        obj.insert("is_member".into(), AgentValue::boolean(is_member));
+        obj.insert("is_member".into(), Value::boolean(is_member));
     }
 
     if let Some(num_members) = ch.num_members {
-        obj.insert(
-            "num_members".into(),
-            AgentValue::integer(num_members as i64),
-        );
+        obj.insert("num_members".into(), Value::integer(num_members as i64));
     }
 
     if let Some(ref topic) = ch.topic {
-        obj.insert("topic".into(), AgentValue::string(topic.value.clone()));
+        obj.insert("topic".into(), Value::string(topic.value.clone()));
     }
 
     if let Some(ref purpose) = ch.purpose {
-        obj.insert("purpose".into(), AgentValue::string(purpose.value.clone()));
+        obj.insert("purpose".into(), Value::string(purpose.value.clone()));
     }
 
-    AgentValue::object(obj)
+    Value::object(obj)
 }
 
-/// Agent for listening to Slack messages in real-time via Socket Mode.
+/// Module for listening to Slack messages in real-time via Socket Mode.
 ///
-/// This agent starts listening when activated and outputs messages as they arrive.
+/// This module starts listening when activated and outputs messages as they arrive.
 ///
 /// # Configuration
 /// - `channel`: Optional channel filter. If empty, listens to all channels.
@@ -525,10 +499,10 @@ fn slack_channel_to_agent_value(ch: &SlackChannelInfo) -> AgentValue {
     category = CATEGORY,
     outputs = [PORT_VALUE],
     string_config(name = CONFIG_CHANNEL),
-    custom_global_config(name = CONFIG_SLACK_APP_TOKEN, type_ = "password", default = AgentValue::string(""), title = "Slack App Token"),
+    custom_global_config(name = CONFIG_SLACK_APP_TOKEN, type_ = "password", default = Value::string(""), title = "Slack App Token"),
 )]
-struct SlackListenerAgent {
-    data: AgentData,
+struct SlackListenerModule {
+    data: ModuleData,
     shutdown_tx: Option<mpsc::Sender<()>>,
 }
 
@@ -541,15 +515,15 @@ struct SlackListenerUserState {
 }
 
 #[async_trait]
-impl AsAgent for SlackListenerAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for SlackListenerModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
             shutdown_tx: None,
         })
     }
 
-    async fn start(&mut self) -> Result<(), AgentError> {
+    async fn start(&mut self) -> Result<()> {
         let client = Arc::new(get_client().clone());
 
         let bot_token = get_token(self.ma())?;
@@ -557,7 +531,7 @@ impl AsAgent for SlackListenerAgent {
         let bot_user_id = bot_session
             .auth_test()
             .await
-            .map_err(|e| AgentError::IoError(format!("Slack API error during auth_test: {}", e)))?
+            .map_err(|e| Error::IoError(format!("Slack API error during auth_test: {}", e)))?
             .user_id;
 
         let config = self.configs()?;
@@ -616,7 +590,7 @@ impl AsAgent for SlackListenerAgent {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), AgentError> {
+    async fn stop(&mut self) -> Result<()> {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(()).await;
         }
@@ -665,9 +639,9 @@ async fn push_events_handler(
         #[cfg(not(feature = "image"))]
         let image: Option<PhotonImage> = None;
 
-        if let Some(message) = slack_push_message_to_agent_value(&msg_event, image) {
+        if let Some(message) = slack_push_message_to_value(&msg_event, image) {
             if let Err(e) =
-                ma.try_send_agent_out(id, AgentContext::new(), PORT_VALUE.to_string(), message)
+                ma.try_send_module_out(id, ModuleContext::new(), PORT_VALUE.to_string(), message)
             {
                 error!("Failed to output message: {}", e);
             }
@@ -708,17 +682,17 @@ async fn download_first_image(msg: &SlackMessageEvent, bot_token: &str) -> Optio
 }
 
 #[cfg(feature = "image")]
-async fn download_slack_file(url: &str, bot_token: &str) -> Result<Vec<u8>, AgentError> {
+async fn download_slack_file(url: &str, bot_token: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
     let response = client
         .get(url)
         .header("Authorization", format!("Bearer {}", bot_token))
         .send()
         .await
-        .map_err(|e| AgentError::IoError(format!("Failed to fetch file: {}", e)))?;
+        .map_err(|e| Error::IoError(format!("Failed to fetch file: {}", e)))?;
 
     if !response.status().is_success() {
-        return Err(AgentError::IoError(format!(
+        return Err(Error::IoError(format!(
             "Failed to download file: HTTP {}",
             response.status()
         )));
@@ -728,13 +702,13 @@ async fn download_slack_file(url: &str, bot_token: &str) -> Result<Vec<u8>, Agen
         .bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| AgentError::IoError(format!("Failed to read file bytes: {}", e)))
+        .map_err(|e| Error::IoError(format!("Failed to read file bytes: {}", e)))
 }
 
-fn slack_push_message_to_agent_value(
+fn slack_push_message_to_value(
     msg: &SlackMessageEvent,
     #[allow(unused_variables)] image: Option<PhotonImage>,
-) -> Option<AgentValue> {
+) -> Option<Value> {
     let text = msg
         .content
         .as_ref()
@@ -760,16 +734,16 @@ fn slack_push_message_to_agent_value(
         message.image = image.map(Arc::new);
 
         let mut obj = im::HashMap::new();
-        obj.insert("message".into(), AgentValue::message(message));
+        obj.insert("message".into(), Value::message(message));
         if let Some(user) = user {
-            obj.insert("user".into(), AgentValue::string(user));
+            obj.insert("user".into(), Value::string(user));
         }
-        obj.insert("channel".into(), AgentValue::string(channel));
-        obj.insert("ts".into(), AgentValue::string(ts));
+        obj.insert("channel".into(), Value::string(channel));
+        obj.insert("ts".into(), Value::string(ts));
         if let Some(thread_ts) = thread_ts {
-            obj.insert("thread_ts".into(), AgentValue::string(thread_ts));
+            obj.insert("thread_ts".into(), Value::string(thread_ts));
         }
-        Some(AgentValue::object(obj))
+        Some(Value::object(obj))
     }
 
     #[cfg(not(feature = "image"))]
@@ -777,75 +751,69 @@ fn slack_push_message_to_agent_value(
         let message = Message::user(text);
 
         let mut obj = im::HashMap::new();
-        obj.insert("message".into(), AgentValue::message(message));
+        obj.insert("message".into(), Value::message(message));
         if let Some(user) = user {
-            obj.insert("user".into(), AgentValue::string(user));
+            obj.insert("user".into(), Value::string(user));
         }
-        obj.insert("channel".into(), AgentValue::string(channel));
-        obj.insert("ts".into(), AgentValue::string(ts));
+        obj.insert("channel".into(), Value::string(channel));
+        obj.insert("ts".into(), Value::string(ts));
         if let Some(thread_ts) = thread_ts {
-            obj.insert("thread_ts".into(), AgentValue::string(thread_ts));
+            obj.insert("thread_ts".into(), Value::string(thread_ts));
         }
-        Some(AgentValue::object(obj))
+        Some(Value::object(obj))
     }
 }
 
-/// Agent for converting Slack messages to LLM Message format.
+/// Module for converting Slack messages to LLM Message format.
 ///
 /// Converts Slack message objects (with `text`, `user`, `channel`, `ts` fields)
-/// into AgentValue::Message format suitable for LLM agents.
+/// into Value::Message format suitable for LLM modules.
 ///
 /// # Input
 /// - `value`: Single Slack message object or array of Slack message objects
 ///
 /// # Output
-/// - `message`: AgentValue::Message or array of AgentValue::Message
+/// - `message`: Value::Message or array of Value::Message
 #[modular_agent(
     title = "ToMessage",
     category = CATEGORY,
     inputs = [PORT_VALUE],
     outputs = [PORT_MESSAGE],
 )]
-struct SlackToMessageAgent {
-    data: AgentData,
+struct SlackToMessageModule {
+    data: ModuleData,
 }
 
 #[async_trait]
-impl AsAgent for SlackToMessageAgent {
-    fn new(ma: ModularAgent, id: String, spec: AgentSpec) -> Result<Self, AgentError> {
+impl AsModule for SlackToMessageModule {
+    fn new(ma: ModularAgent, id: String, spec: ModuleSpec) -> Result<Self> {
         Ok(Self {
-            data: AgentData::new(ma, id, spec),
+            data: ModuleData::new(ma, id, spec),
         })
     }
 
-    async fn process(
-        &mut self,
-        ctx: AgentContext,
-        _port: String,
-        value: AgentValue,
-    ) -> Result<(), AgentError> {
+    async fn process(&mut self, ctx: ModuleContext, _port: String, value: Value) -> Result<()> {
         if value.is_array() {
             let arr = value.as_array().unwrap();
-            let messages: im::Vector<AgentValue> = arr
+            let messages: im::Vector<Value> = arr
                 .iter()
                 .filter_map(|v| slack_value_to_message(v).ok())
-                .map(AgentValue::message)
+                .map(Value::message)
                 .collect();
-            self.output(ctx, PORT_MESSAGE, AgentValue::array(messages))
-                .await
+            self.output(ctx, PORT_MESSAGE, Value::array(messages)).await
         } else {
             let message = slack_value_to_message(&value)?;
-            self.output(ctx, PORT_MESSAGE, AgentValue::message(message))
+            self.output(ctx, PORT_MESSAGE, Value::message(message))
                 .await
         }
     }
 }
 
-fn slack_value_to_message(value: &AgentValue) -> Result<Message, AgentError> {
+fn slack_value_to_message(value: &Value) -> Result<Message> {
     match value {
-        AgentValue::String(s) => Ok(Message::user(s.to_string())),
-        AgentValue::Message(msg) => Ok(Message::clone(msg)),
-        AgentValue::Object(obj) => {
+        Value::String(s) => Ok(Message::user(s.to_string())),
+        Value::Message(msg) => Ok(Message::clone(msg)),
+        Value::Object(obj) => {
             // New format: check for "message" field first
             if let Some(msg) = obj.get("message").and_then(|v| v.as_message()) {
                 return Ok(Message::clone(msg));
@@ -858,7 +826,7 @@ fn slack_value_to_message(value: &AgentValue) -> Result<Message, AgentError> {
                 .to_string();
             Ok(Message::user(text))
         }
-        _ => Err(AgentError::InvalidValue(
+        _ => Err(Error::InvalidValue(
             "Expected string, message, or object for Slack message".to_string(),
         )),
     }
