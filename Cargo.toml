@@ -20,7 +20,7 @@ slack-morphism = { version = "2", features = ["hyper"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 tokio = { version = "1", features = ["sync", "rt"] }
 tracing = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true}
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true}
 
 modular-agent-core = { path = "../../crates/modular-agent-core" }
 
