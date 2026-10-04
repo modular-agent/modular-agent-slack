@@ -1,6 +1,6 @@
 [package]
 name = "modular-agent-slack"
-version = "0.9.0"
+version = "0.9.1"
 description = "Slack Modules for Modular Agent"
 authors = ["Akira Ishino <akira@lumilab.jp>"]
 edition = "2024"
